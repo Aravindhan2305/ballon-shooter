@@ -1,0 +1,588 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      name="viewport"
+      content="width=device-width,initial-scale=1,maximum-scale=1,viewport-fit=cover"
+    />
+    <title>Stick Archer — Balloon Boom</title>
+    <style>
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        height: 100%;
+        overflow: hidden;
+        background: #fff;
+        color: #000;
+        font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial,
+          sans-serif;
+      }
+      canvas {
+        display: block;
+        background: #fff;
+      }
+      /* Tiny helper overlay for mobile hints */
+      #hint {
+        position: fixed;
+        bottom: 12px;
+        left: 12px;
+        right: 12px;
+        text-align: center;
+        font-size: 12px;
+        opacity: 0.6;
+        user-select: none;
+        pointer-events: none;
+      }
+    </style>
+  </head>
+  <body>
+    <canvas id="game"></canvas>
+    <div id="hint">
+      Click / Tap to aim & shoot • R = Restart • F = Fullscreen
+    </div>
+    <script>
+      (() => {
+        const canvas = document.getElementById("game");
+        const ctx = canvas.getContext("2d");
+        let W = 0,
+          H = 0,
+          DPR = Math.max(1, window.devicePixelRatio || 1);
+
+        function resize() {
+          W = Math.floor(window.innerWidth);
+          H = Math.floor(window.innerHeight);
+          canvas.width = Math.floor(W * DPR);
+          canvas.height = Math.floor(H * DPR);
+          canvas.style.width = W + "px";
+          canvas.style.height = H + "px";
+          ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+        }
+        window.addEventListener("resize", resize, { passive: true });
+        resize();
+
+        // -------- Game State --------
+        const state = {
+          score: 0,
+          misses: 0,
+          maxMisses: 10,
+          gameOver: false,
+          lastShotAt: 0,
+          fireDelay: 160, // ms
+        };
+
+        // Archer at bottom center
+        const archer = {
+          x: () => W / 2,
+          y: () => H - Math.min(120, H * 0.18),
+          armLen: 25,
+          bowLen: 40,
+        };
+
+        // Entities
+        const arrows = [];
+        const balloons = [];
+        const texts = []; // floating texts: BOOM!, OUT!
+        const bursts = []; // starburst particles for BOOM!
+
+        // Input
+        const input = { x: W / 2, y: H / 2, down: false };
+        function setAimFromEvent(e) {
+          if (e.touches && e.touches[0]) {
+            input.x = e.touches[0].clientX;
+            input.y = e.touches[0].clientY;
+          } else {
+            input.x = e.clientX;
+            input.y = e.clientY;
+          }
+        }
+        window.addEventListener("mousemove", setAimFromEvent, {
+          passive: true,
+        });
+        window.addEventListener("touchmove", setAimFromEvent, {
+          passive: true,
+        });
+        window.addEventListener("mousedown", (e) => {
+          input.down = true;
+          setAimFromEvent(e);
+          tryShoot();
+        });
+        window.addEventListener(
+          "touchstart",
+          (e) => {
+            input.down = true;
+            setAimFromEvent(e);
+            tryShoot();
+          },
+          { passive: true }
+        );
+        window.addEventListener("mouseup", () => {
+          input.down = false;
+        });
+        window.addEventListener("touchend", () => {
+          input.down = false;
+        });
+
+        window.addEventListener("keydown", (e) => {
+          if (e.code === "Space") {
+            tryShoot();
+          }
+          if (e.key.toLowerCase() === "r") restart();
+          if (e.key.toLowerCase() === "f") toggleFullscreen();
+        });
+
+        function toggleFullscreen() {
+          const el = document.documentElement;
+          if (!document.fullscreenElement) {
+            el.requestFullscreen?.();
+          } else {
+            document.exitFullscreen?.();
+          }
+        }
+
+        // -------- Spawning Balloons --------
+        function spawnBalloon() {
+          const r = rand(14, 24);
+          const x = rand(r + 12, W - r - 12);
+          const y = H + r + rand(12, 80);
+          const speed = rand(40, 90) / 100; // upward pixels per frame-ish (we also scale by dt)
+          balloons.push({
+            x,
+            y,
+            r,
+            vy: -speed,
+            wobbleT: rand(0, Math.PI * 2),
+            wobbleAmp: rand(4, 14),
+            ropeLen: rand(10, 22),
+          });
+        }
+
+        // Maintain balloon count depending on screen size
+        function desiredBalloonCount() {
+          const base = 5 + Math.floor((W * H) / 160000); // scale with area
+          return Math.max(5, Math.min(16, base));
+        }
+
+        // -------- Shooting --------
+        function tryShoot() {
+          const now = performance.now();
+          if (state.gameOver) return;
+          if (now - state.lastShotAt < state.fireDelay) return;
+          state.lastShotAt = now;
+
+          const px = archer.x();
+          const py = archer.y() - 8; // bow hand height
+          const angle = Math.atan2(input.y - py, input.x - px);
+          const speed = 720; // px/s
+          const vx = Math.cos(angle) * speed;
+          const vy = Math.sin(angle) * speed;
+
+          // Arrow spawns a bit forward from hand
+          const offset = 24;
+          arrows.push({
+            x: px + Math.cos(angle) * offset,
+            y: py + Math.sin(angle) * offset,
+            vx,
+            vy,
+            angle,
+            life: 0,
+            alive: true,
+          });
+        }
+
+        // -------- Utils --------
+        function rand(min, max) {
+          return Math.random() * (max - min) + min;
+        }
+        function clamp(v, a, b) {
+          return Math.max(a, Math.min(b, v));
+        }
+
+        // Floating text helpers
+        function addText(msg, x, y) {
+          texts.push({ msg, x, y, vy: -40, life: 0, ttl: 0.7 });
+        }
+
+        // Starburst particles for “BOOM!”
+        function addBurst(x, y) {
+          const n = 10;
+          for (let i = 0; i < n; i++) {
+            const a = (i / n) * Math.PI * 2;
+            bursts.push({
+              x,
+              y,
+              vx: Math.cos(a) * rand(60, 140),
+              vy: Math.sin(a) * rand(60, 140),
+              life: 0,
+              ttl: 0.5 + Math.random() * 0.4,
+            });
+          }
+        }
+
+        // -------- Game Loop --------
+        let last = performance.now();
+        function loop(now) {
+          requestAnimationFrame(loop);
+          const dt = Math.min(0.033, (now - last) / 1000); // clamp to handle stalls
+          last = now;
+
+          // Spawn balloons to desired count
+          while (balloons.length < desiredBalloonCount()) spawnBalloon();
+
+          // Update
+          updateArrows(dt);
+          updateBalloons(dt);
+          updateFX(dt);
+
+          // Draw
+          ctx.clearRect(0, 0, W, H);
+          drawScoreboard();
+          drawArcher();
+          drawBalloons();
+          drawArrows();
+          drawFX();
+          if (state.gameOver) drawGameOver();
+        }
+        requestAnimationFrame(loop);
+
+        // -------- Update Functions --------
+        function updateArrows(dt) {
+          for (const a of arrows) {
+            if (!a.alive) continue;
+            a.life += dt;
+            // slight gravity for style
+            a.vy += 300 * dt;
+            a.x += a.vx * dt;
+            a.y += a.vy * dt;
+            a.angle = Math.atan2(a.vy, a.vx);
+
+            // Remove if off screen
+            if (a.x < -50 || a.x > W + 50 || a.y < -50 || a.y > H + 50)
+              a.alive = false;
+
+            // Collision with balloons: check tip vs center
+            const tipX = a.x + Math.cos(a.angle) * 24;
+            const tipY = a.y + Math.sin(a.angle) * 24;
+            for (let i = balloons.length - 1; i >= 0; i--) {
+              const b = balloons[i];
+              const dx = tipX - b.x;
+              const dy = tipY - b.y;
+              if (dx * dx + dy * dy <= b.r * b.r) {
+                // Hit!
+                balloons.splice(i, 1);
+                state.score++;
+                addText("BOOM!", b.x, b.y);
+                addBurst(b.x, b.y);
+                // leave arrow flying; optional: stick it
+                break;
+              }
+            }
+          }
+          // cleanup
+          for (let i = arrows.length - 1; i >= 0; i--) {
+            if (!arrows[i].alive) arrows.splice(i, 1);
+          }
+        }
+
+        function updateBalloons(dt) {
+          for (let i = balloons.length - 1; i >= 0; i--) {
+            const b = balloons[i];
+            b.wobbleT += dt * 2;
+            b.x += Math.cos(b.wobbleT) * (b.wobbleAmp * dt);
+            b.y += b.vy * (dt * 60); // slight normalization so speeds feel consistent
+
+            // Escaped?
+            if (b.y + b.r < -4) {
+              balloons.splice(i, 1);
+              state.misses++;
+              addText("BYEE!", clamp(b.x, 40, W - 40), 40);
+              if (state.misses >= state.maxMisses) {
+                state.gameOver = true;
+              }
+            }
+          }
+        }
+
+        function updateFX(dt) {
+          for (let i = texts.length - 1; i >= 0; i--) {
+            const t = texts[i];
+            t.life += dt;
+            t.y += t.vy * dt;
+            if (t.life > t.ttl) texts.splice(i, 1);
+          }
+          for (let i = bursts.length - 1; i >= 0; i--) {
+            const p = bursts[i];
+            p.life += dt;
+            p.x += p.vx * dt;
+            p.y += p.vy * dt;
+            // friction
+            p.vx *= 1 - 2 * dt;
+            p.vy *= 1 - 2 * dt;
+            if (p.life > p.ttl) bursts.splice(i, 1);
+          }
+        }
+
+        // -------- Draw Functions --------
+        function drawScoreboard() {
+          ctx.save();
+          ctx.globalAlpha = 0.9;
+          ctx.fillStyle = "#000";
+          ctx.font =
+            "700 20px system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif";
+          ctx.textBaseline = "top";
+          ctx.fillText(`Score: ${state.score}`, 14, 12);
+          ctx.font =
+            "500 14px system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif";
+          ctx.fillText(`Miss: ${state.misses}/${state.maxMisses}`, 14, 36);
+          ctx.restore();
+        }
+
+        function drawArcher() {
+          const x = archer.x();
+          const y = archer.y();
+
+          ctx.save();
+          ctx.strokeStyle = "#000";
+          ctx.fillStyle = "#000";
+          ctx.lineWidth = 3;
+
+          // Legs (stick)
+          ctx.beginPath();
+          ctx.moveTo(x, y);
+          ctx.lineTo(x - 12, y + 36);
+          ctx.moveTo(x, y);
+          ctx.lineTo(x + 12, y + 36);
+          ctx.stroke();
+
+          // Body
+          ctx.beginPath();
+          ctx.moveTo(x, y - 32);
+          ctx.lineTo(x, y);
+          ctx.stroke();
+
+          // Head
+          ctx.beginPath();
+          ctx.arc(x, y - 44, 8, 0, Math.PI * 2);
+          ctx.fill();
+
+          // Aim direction
+          const handX = x;
+          const handY = y - 8;
+          const angle = Math.atan2(input.y - handY, input.x - handX);
+
+          // Bow (simple arc)
+          const bowLen = archer.bowLen;
+          const bowX = handX + Math.cos(angle) * 10;
+          const bowY = handY + Math.sin(angle) * 10;
+          ctx.beginPath();
+          ctx.arc(bowX, bowY, bowLen * 0.8, angle - 0.4, angle + 0.4);
+          ctx.stroke();
+
+          // Front arm to bow
+          ctx.beginPath();
+          ctx.moveTo(x, y - 28); // shoulder
+          ctx.lineTo(handX, handY); // hand holding bow
+          ctx.stroke();
+
+          // Back arm pulling string
+          const pull = 10; // constant pullback look
+          const backX = handX - Math.cos(angle) * pull;
+          const backY = handY - Math.sin(angle) * pull;
+          ctx.beginPath();
+          ctx.moveTo(x, y - 28);
+          ctx.lineTo(backX, backY);
+          ctx.stroke();
+
+          // String
+          ctx.beginPath();
+          ctx.moveTo(
+            bowX + Math.cos(angle - 0.4) * bowLen * 0.8,
+            bowY + Math.sin(angle - 0.4) * bowLen * 0.8
+          );
+          ctx.lineTo(backX, backY);
+          ctx.lineTo(
+            bowX + Math.cos(angle + 0.4) * bowLen * 0.8,
+            bowY + Math.sin(angle + 0.4) * bowLen * 0.8
+          );
+          ctx.stroke();
+
+          ctx.restore();
+        }
+
+        function drawArrows() {
+          ctx.save();
+          ctx.strokeStyle = "#000";
+          ctx.fillStyle = "#000";
+          for (const a of arrows) {
+            // Shaft
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            const tailX = a.x - Math.cos(a.angle) * 16;
+            const tailY = a.y - Math.sin(a.angle) * 16;
+            const tipX = a.x + Math.cos(a.angle) * 24;
+            const tipY = a.y + Math.sin(a.angle) * 24;
+            ctx.moveTo(tailX, tailY);
+            ctx.lineTo(tipX, tipY);
+            ctx.stroke();
+
+            // Arrowhead (triangle)
+            ctx.beginPath();
+            const leftX =
+              tipX -
+              Math.cos(a.angle) * 6 +
+              Math.cos(a.angle + Math.PI / 2) * 4;
+            const leftY =
+              tipY -
+              Math.sin(a.angle) * 6 +
+              Math.sin(a.angle + Math.PI / 2) * 4;
+            const rightX =
+              tipX -
+              Math.cos(a.angle) * 6 +
+              Math.cos(a.angle - Math.PI / 2) * 4;
+            const rightY =
+              tipY -
+              Math.sin(a.angle) * 6 +
+              Math.sin(a.angle - Math.PI / 2) * 4;
+            ctx.moveTo(tipX, tipY);
+            ctx.lineTo(leftX, leftY);
+            ctx.lineTo(rightX, rightY);
+            ctx.closePath();
+            ctx.fill();
+
+            // Fletching (two tiny lines)
+            ctx.lineWidth = 1.5;
+            ctx.beginPath();
+            ctx.moveTo(tailX, tailY);
+            ctx.lineTo(
+              tailX + Math.cos(a.angle + Math.PI / 2) * 5,
+              tailY + Math.sin(a.angle + Math.PI / 2) * 5
+            );
+            ctx.moveTo(tailX, tailY);
+            ctx.lineTo(
+              tailX + Math.cos(a.angle - Math.PI / 2) * 5,
+              tailY + Math.sin(a.angle - Math.PI / 2) * 5
+            );
+            ctx.stroke();
+          }
+          ctx.restore();
+        }
+
+        function drawBalloons() {
+          ctx.save();
+          ctx.strokeStyle = "#000";
+          ctx.fillStyle = "#fff"; // white fill with black outline for “balloon” look
+          ctx.lineWidth = 2;
+
+          for (const b of balloons) {
+            // string/rope
+            ctx.beginPath();
+            ctx.moveTo(b.x, b.y + b.r);
+            ctx.lineTo(b.x, b.y + b.r + b.ropeLen);
+            ctx.stroke();
+
+            // balloon
+            ctx.beginPath();
+            ctx.arc(b.x, b.y, b.r, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.stroke();
+
+            // small knot triangle
+            ctx.beginPath();
+            ctx.moveTo(b.x, b.y + b.r);
+            ctx.lineTo(b.x - 4, b.y + b.r + 6);
+            ctx.lineTo(b.x + 4, b.y + b.r + 6);
+            ctx.closePath();
+            ctx.fillStyle = "#000";
+            ctx.fill();
+            ctx.fillStyle = "#fff";
+          }
+          ctx.restore();
+        }
+
+        function drawFX() {
+          // Floating texts
+          for (const t of texts) {
+            const alpha = 1 - t.life / t.ttl;
+            ctx.save();
+            ctx.globalAlpha = clamp(alpha, 0, 1);
+            ctx.fillStyle = "#000";
+            ctx.font =
+              "bold 28px system-ui, -apple-system, Segoe UI, Roboto, Arial";
+            ctx.textAlign = "center";
+            ctx.textBaseline = "middle";
+            // BOOM!: add a tiny star outline behind
+            if (t.msg === "BOOM!") {
+              ctx.beginPath();
+              const spikes = 10,
+                R = 24,
+                r = 10;
+              for (let i = 0; i < spikes * 2; i++) {
+                const ang = (i / (spikes * 2)) * Math.PI * 2;
+                const rad = i % 2 === 0 ? R : r;
+                const x = t.x + Math.cos(ang) * rad;
+                const y = t.y + Math.sin(ang) * rad;
+                if (i === 0) ctx.moveTo(x, y);
+                else ctx.lineTo(x, y);
+              }
+              ctx.closePath();
+              ctx.strokeStyle = "#000";
+              ctx.lineWidth = 2;
+              ctx.stroke();
+            }
+            ctx.fillText(t.msg, t.x, t.y);
+            ctx.restore();
+          }
+
+          // Starburst particles
+          ctx.save();
+          ctx.strokeStyle = "#000";
+          ctx.lineWidth = 2;
+          for (const p of bursts) {
+            const k = 1 - p.life / p.ttl;
+            const len = 8 * k + 2;
+            ctx.beginPath();
+            ctx.moveTo(p.x - len, p.y);
+            ctx.lineTo(p.x + len, p.y);
+            ctx.moveTo(p.x, p.y - len);
+            ctx.lineTo(p.x, p.y + len);
+            ctx.stroke();
+          }
+          ctx.restore();
+        }
+
+        function drawGameOver() {
+          ctx.save();
+          ctx.globalAlpha = 0.88;
+          ctx.fillStyle = "#fff";
+          ctx.fillRect(0, 0, W, H);
+          ctx.globalAlpha = 1;
+          ctx.fillStyle = "#000";
+          ctx.textAlign = "center";
+          ctx.textBaseline = "middle";
+          ctx.font =
+            "700 48px system-ui, -apple-system, Segoe UI, Roboto, Arial";
+          ctx.fillText("GAME OVER", W / 2, H / 2 - 20);
+          ctx.font =
+            "500 20px system-ui, -apple-system, Segoe UI, Roboto, Arial";
+          ctx.fillText(
+            `Score: ${state.score}   •   Press R to Restart`,
+            W / 2,
+            H / 2 + 26
+          );
+        }
+
+        // -------- Restart --------
+        function restart() {
+          state.score = 0;
+          state.misses = 0;
+          state.gameOver = false;
+          arrows.length = 0;
+          balloons.length = 0;
+          texts.length = 0;
+          bursts.length = 0;
+        }
+      })();
+    </script>
+  </body>
+</html>
